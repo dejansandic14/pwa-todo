@@ -1,0 +1,159 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { strings } from '../strings'
+import {
+  fetchWeather,
+  formatTime,
+  readCachedWeather,
+  WEATHER_SYNC_TAG,
+  WEATHER_UPDATED,
+  type Weather,
+} from '../weather'
+
+const t = strings.weather
+
+// Open-Meteo updates "current" conditions every 15 minutes; older cached data is labelled as such.
+const STALE_AFTER_MS = 15 * 60 * 1000
+
+// Background Sync is Chromium-only and not in TypeScript's DOM library.
+interface SyncManager {
+  register(tag: string): Promise<void>
+}
+type SyncRegistration = ServiceWorkerRegistration & { sync: SyncManager }
+
+export default function WeatherCard() {
+  const [weather, setWeather] = useState<Weather | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [failed, setFailed] = useState(false)
+  const [online, setOnline] = useState(navigator.onLine)
+  const [notice, setNotice] = useState<string | null>(null)
+  // Fallback for browsers without Background Sync: remember that a refresh was requested offline.
+  const refreshWhenOnline = useRef(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      setWeather(await fetchWeather())
+      setFailed(false)
+      setNotice(null)
+    } catch {
+      setFailed(true)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+    // On the very first visit the worker does not control the page yet, so that first request
+    // bypasses it and is not cached. Re-fetch once the worker takes control (clients.claim()).
+    const sw = navigator.serviceWorker
+    if (sw && !sw.controller) {
+      const onControl = () => void load()
+      sw.addEventListener('controllerchange', onControl, { once: true })
+      return () => sw.removeEventListener('controllerchange', onControl)
+    }
+  }, [load])
+
+  // The service worker posts WEATHER_UPDATED after it stored a fresh copy (SWR revalidation or
+  // Background Sync). Re-read the cache directly — fetching again would trigger another revalidation.
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.data?.type !== WEATHER_UPDATED) return
+      void readCachedWeather().then((fresh) => {
+        if (fresh) {
+          setWeather(fresh)
+          setNotice(null)
+        }
+      })
+    }
+    navigator.serviceWorker?.addEventListener('message', onMessage)
+    return () => navigator.serviceWorker?.removeEventListener('message', onMessage)
+  }, [])
+
+  useEffect(() => {
+    const update = () => {
+      setOnline(navigator.onLine)
+      if (navigator.onLine && refreshWhenOnline.current) {
+        refreshWhenOnline.current = false
+        void load()
+      }
+    }
+    window.addEventListener('online', update)
+    window.addEventListener('offline', update)
+    return () => {
+      window.removeEventListener('online', update)
+      window.removeEventListener('offline', update)
+    }
+  }, [load])
+
+  /** "Osvježi": fetch now, or — while offline — queue a Background Sync for when the network returns. */
+  async function refresh() {
+    if (navigator.onLine) {
+      await load()
+      return
+    }
+    const registration = (await navigator.serviceWorker?.ready) as SyncRegistration | undefined
+    if (registration && 'SyncManager' in window) {
+      try {
+        await registration.sync.register(WEATHER_SYNC_TAG)
+        setNotice(t.syncScheduled)
+        return
+      } catch (err) {
+        console.warn('Background Sync registration failed, using online-event fallback', err)
+      }
+    }
+    refreshWhenOnline.current = true
+    setNotice(t.syncFallback)
+  }
+
+  const isStale =
+    weather !== null &&
+    weather.fromCache &&
+    (!online || Date.now() - new Date(weather.fetchedAt).getTime() > STALE_AFTER_MS)
+
+  return (
+    <section className="card weather" aria-labelledby="weather-heading">
+      <div className="card-header">
+        <h2 id="weather-heading">{t.heading}</h2>
+        <button type="button" className="btn btn--small" onClick={() => void refresh()} disabled={loading}>
+          {loading ? t.refreshing : t.refresh}
+        </button>
+      </div>
+
+      {weather ? (
+        <>
+          <div className="weather-main">
+            <span className="weather-temp">{weather.temperature}°C</span>
+            <span className="weather-desc">{weather.description}</span>
+          </div>
+
+          <dl className="weather-details">
+            <div>
+              <dt>{t.wind}</dt>
+              <dd>{weather.wind} km/h</dd>
+            </div>
+            <div>
+              <dt>{t.today}</dt>
+              <dd>
+                {t.min} {weather.min}° · {t.max} {weather.max}°
+              </dd>
+            </div>
+          </dl>
+
+          <p className="muted weather-updated">
+            {t.updated} {formatTime(weather.fetchedAt)}
+            {isStale ? ` (${t.fromCache})` : ''}
+          </p>
+        </>
+      ) : (
+        <p className="muted weather-updated">{failed ? t.error : t.loading}</p>
+      )}
+
+      {notice && (
+        <p className="notice" role="status">
+          {notice}
+        </p>
+      )}
+    </section>
+  )
+}
