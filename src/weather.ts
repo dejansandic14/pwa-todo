@@ -18,6 +18,30 @@ export const WEATHER_CACHE = 'pwa-todo-weather-v1'
 /** Background Sync tag registered when a refresh is requested while offline. */
 export const WEATHER_SYNC_TAG = 'weather-refresh'
 
+/**
+ * localStorage key for the fallback used by browsers without Background Sync: an offline
+ * refresh request is persisted here so it survives the app being closed and reopened.
+ */
+export const WEATHER_REFRESH_PENDING_KEY = 'pwa-todo-weather-refresh-pending'
+
+export function hasPendingWeatherRefresh(): boolean {
+  try {
+    return localStorage.getItem(WEATHER_REFRESH_PENDING_KEY) !== null
+  } catch {
+    return false
+  }
+}
+
+/** localStorage can throw (private mode, storage disabled); the flag is then best-effort. */
+export function setPendingWeatherRefresh(pending: boolean): void {
+  try {
+    if (pending) localStorage.setItem(WEATHER_REFRESH_PENDING_KEY, new Date().toISOString())
+    else localStorage.removeItem(WEATHER_REFRESH_PENDING_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
 /** Message the service worker posts to windows after it stored a fresh weather copy. */
 export const WEATHER_UPDATED = 'WEATHER_UPDATED'
 
@@ -90,6 +114,13 @@ export function describeWeatherCode(code: number): string {
   return c.unknown
 }
 
-export function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString('sr-Latn-BA', { hour: '2-digit', minute: '2-digit' })
+/** Date and time of the forecast, so stale cached data is recognizable as such. */
+export function formatDateTime(iso: string): string {
+  return new Date(iso).toLocaleString('sr-Latn-BA', {
+    day: 'numeric',
+    month: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }

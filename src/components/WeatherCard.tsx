@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { strings } from '../strings'
 import {
   fetchWeather,
-  formatTime,
+  formatDateTime,
+  hasPendingWeatherRefresh,
   readCachedWeather,
+  setPendingWeatherRefresh,
   WEATHER_SYNC_TAG,
   WEATHER_UPDATED,
   type Weather,
@@ -26,23 +28,31 @@ export default function WeatherCard() {
   const [failed, setFailed] = useState(false)
   const [online, setOnline] = useState(navigator.onLine)
   const [notice, setNotice] = useState<string | null>(null)
-  // Fallback for browsers without Background Sync: remember that a refresh was requested offline.
-  const refreshWhenOnline = useRef(false)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<boolean> => {
     setLoading(true)
     try {
-      setWeather(await fetchWeather())
+      const fresh = await fetchWeather()
+      setWeather(fresh)
       setFailed(false)
       setNotice(null)
+      // A fresh network response satisfies a refresh queued offline in an earlier session.
+      // A cache hit does not: the service worker's revalidation (WEATHER_UPDATED) clears it.
+      if (!fresh.fromCache) setPendingWeatherRefresh(false)
+      return true
     } catch {
       setFailed(true)
+      return false
     } finally {
       setLoading(false)
     }
   }, [])
 
   useEffect(() => {
+    // A refresh queued offline in a previous session (fallback for browsers without
+    // Background Sync): while still offline, re-show the notice; once the network is
+    // back the load below performs the refresh and clears the flag.
+    if (hasPendingWeatherRefresh() && !navigator.onLine) setNotice(t.syncFallback)
     void load()
     // On the very first visit the worker does not control the page yet, so that first request
     // bypasses it and is not cached. Re-fetch once the worker takes control (clients.claim()).
@@ -63,6 +73,8 @@ export default function WeatherCard() {
         if (fresh) {
           setWeather(fresh)
           setNotice(null)
+          // The worker just stored a copy fetched from the network: a genuine refresh.
+          setPendingWeatherRefresh(false)
         }
       })
     }
@@ -73,10 +85,7 @@ export default function WeatherCard() {
   useEffect(() => {
     const update = () => {
       setOnline(navigator.onLine)
-      if (navigator.onLine && refreshWhenOnline.current) {
-        refreshWhenOnline.current = false
-        void load()
-      }
+      if (navigator.onLine && hasPendingWeatherRefresh()) void load()
     }
     window.addEventListener('online', update)
     window.addEventListener('offline', update)
@@ -89,7 +98,10 @@ export default function WeatherCard() {
   /** "Osvježi": fetch now, or — while offline — queue a Background Sync for when the network returns. */
   async function refresh() {
     if (navigator.onLine) {
-      await load()
+      // The device claims to be online, but the request can still fail (captive portal,
+      // flaky uplink, API down): say so instead of silently keeping the saved forecast.
+      const ok = await load()
+      if (!ok) setNotice(t.refreshFailed)
       return
     }
     const registration = (await navigator.serviceWorker?.ready) as SyncRegistration | undefined
@@ -102,7 +114,8 @@ export default function WeatherCard() {
         console.warn('Background Sync registration failed, using online-event fallback', err)
       }
     }
-    refreshWhenOnline.current = true
+    // No Background Sync: persist the request so it survives closing the app.
+    setPendingWeatherRefresh(true)
     setNotice(t.syncFallback)
   }
 
@@ -141,7 +154,7 @@ export default function WeatherCard() {
           </dl>
 
           <p className="muted weather-updated">
-            {t.updated} {formatTime(weather.fetchedAt)}
+            {t.updated} {formatDateTime(weather.fetchedAt)}
             {isStale ? ` (${t.fromCache})` : ''}
           </p>
         </>
