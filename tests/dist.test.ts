@@ -77,6 +77,9 @@ describe('PWA installability of the built app', () => {
     expect(sw).toContain('icons/icon-512-maskable.png')
     // The injection point must be gone: the plugin replaced it with the real file list.
     expect(sw).not.toContain('__WB_MANIFEST')
+    // The shell cache name is versioned per build (derived from the manifest), never a fixed one.
+    expect(sw).toContain('pwa-todo-shell-')
+    expect(sw).not.toMatch(/["'`]pwa-todo-shell-v1["'`]/)
   })
 
   it('registers the service worker from the main bundle', () => {
@@ -85,5 +88,12 @@ describe('PWA installability of the built app', () => {
     expect(main, 'main JS bundle not found in dist/assets').toBeTruthy()
     const js = readFileSync(join(dist, 'assets', main!), 'utf8')
     expect(js).toContain(`${BASE}sw.js`)
+  })
+
+  it('requests persistent storage from the main bundle', () => {
+    const assets = readdirSync(join(dist, 'assets'))
+    const main = assets.find((name) => /^index-.*\.js$/.test(name))
+    const js = readFileSync(join(dist, 'assets', main!), 'utf8')
+    expect(js).toContain('persistent-storage')
   })
 })
