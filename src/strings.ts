@@ -42,6 +42,9 @@ export const strings = {
     save: 'Sačuvaj',
     cancel: 'Otkaži',
     remove: 'Obriši',
+    loadError: 'Zadaci se nisu mogli učitati iz lokalne baze. Osvježi stranicu i pokušaj ponovo.',
+    saveError: 'Zadatak nije sačuvan — upis u lokalnu bazu nije uspio. Pokušaj ponovo.',
+    deleteError: 'Zadatak nije obrisan — brisanje iz lokalne baze nije uspjelo. Pokušaj ponovo.',
     markDone: 'Označi kao završen',
     markUndone: 'Označi kao nezavršen',
     editLabel: 'Izmjena zadatka',
@@ -59,6 +62,7 @@ export const strings = {
     min: 'min',
     max: 'maks',
     error: 'Vremenska prognoza trenutno nije dostupna.',
+    refreshFailed: 'Osvježavanje nije uspjelo — prikazana je sačuvana prognoza.',
     syncScheduled: 'Osvježavanje je zakazano — izvršiće se kad se veza vrati.',
     syncFallback: 'Nema veze — vrijeme će se osvježiti čim se veza vrati.',
     codes: {

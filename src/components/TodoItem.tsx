@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type KeyboardEvent } from 'react'
 import { strings } from '../strings'
-import type { Todo } from '../db'
+import { MAX_TITLE_LENGTH, type Todo } from '../db'
 
 interface Props {
   todo: Todo
@@ -45,6 +45,7 @@ export default function TodoItem({ todo, onToggle, onRename, onDelete }: Props) 
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={onKeyDown}
+            maxLength={MAX_TITLE_LENGTH}
             autoFocus
           />
           <button type="submit" className="btn btn--primary">

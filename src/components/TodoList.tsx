@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { strings } from '../strings'
-import { deleteTodo, getAllTodos, putTodo, type Todo } from '../db'
+import { deleteTodo, getAllTodos, MAX_TITLE_LENGTH, putTodo, type Todo } from '../db'
 import TodoItem from './TodoItem'
 import { notifyTodoDone } from './NotificationsToggle'
 
@@ -13,41 +13,60 @@ export default function TodoList() {
   // React state mirrors the IndexedDB `todos` store: load once, then write-through on every change.
   const [todos, setTodos] = useState<Todo[]>([])
   const [loaded, setLoaded] = useState(false)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<Filter>('all')
   const [title, setTitle] = useState('')
 
   useEffect(() => {
     getAllTodos()
       .then(setTodos)
-      .catch((err) => console.error('IndexedDB load failed', err))
+      .catch((err) => {
+        console.error('IndexedDB load failed', err)
+        setLoadFailed(true)
+      })
       .finally(() => setLoaded(true))
   }, [])
 
+  // React state only changes after IndexedDB confirms the commit, so the list can never
+  // show something as saved that is not actually on disk.
+  async function write(action: Promise<void>, failure: string): Promise<boolean> {
+    try {
+      await action
+    } catch (err) {
+      console.error('IndexedDB write failed', err)
+      setError(failure)
+      return false
+    }
+    setError(null)
+    return true
+  }
+
   async function handleAdd(e: FormEvent) {
     e.preventDefault()
-    const trimmed = title.trim()
+    const trimmed = title.trim().slice(0, MAX_TITLE_LENGTH)
     if (!trimmed) return
     const todo: Todo = { id: crypto.randomUUID(), title: trimmed, done: false, createdAt: Date.now() }
-    await putTodo(todo)
+    if (!(await write(putTodo(todo), t.saveError))) return
     setTodos((prev) => [...prev, todo])
     setTitle('')
   }
 
   async function handleToggle(todo: Todo) {
     const updated = { ...todo, done: !todo.done }
-    await putTodo(updated)
+    if (!(await write(putTodo(updated), t.saveError))) return
     setTodos((prev) => prev.map((x) => (x.id === todo.id ? updated : x)))
     if (updated.done) void notifyTodoDone(updated.title).catch((err) => console.warn('Notification failed', err))
   }
 
   async function handleRename(todo: Todo, newTitle: string) {
-    const updated = { ...todo, title: newTitle }
-    await putTodo(updated)
+    const updated = { ...todo, title: newTitle.slice(0, MAX_TITLE_LENGTH) }
+    if (!(await write(putTodo(updated), t.saveError))) return
     setTodos((prev) => prev.map((x) => (x.id === todo.id ? updated : x)))
   }
 
   async function handleDelete(todo: Todo) {
-    await deleteTodo(todo.id)
+    if (!(await write(deleteTodo(todo.id), t.deleteError))) return
     setTodos((prev) => prev.filter((x) => x.id !== todo.id))
   }
 
@@ -68,7 +87,7 @@ export default function TodoList() {
           placeholder={t.inputPlaceholder}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          maxLength={200}
+          maxLength={MAX_TITLE_LENGTH}
         />
         <button type="submit" className="btn btn--primary" disabled={!title.trim()}>
           {t.add}
@@ -89,7 +108,17 @@ export default function TodoList() {
         ))}
       </div>
 
-      {!loaded ? null : visible.length === 0 ? (
+      {error && (
+        <p className="notice notice--error" role="alert">
+          {error}
+        </p>
+      )}
+
+      {!loaded ? null : loadFailed ? (
+        <p className="notice notice--error" role="alert">
+          {t.loadError}
+        </p>
+      ) : visible.length === 0 ? (
         <p className="empty">{t.empty[filter]}</p>
       ) : (
         <ul className="todo-list">

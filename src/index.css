@@ -338,6 +338,11 @@ body {
   font-size: 0.9rem;
 }
 
+.notice--error {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
 @media (max-width: 420px) {
   .todo-actions .btn {
     padding: 6px 8px;
