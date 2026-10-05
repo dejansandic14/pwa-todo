@@ -15,7 +15,28 @@ interface SyncEvent extends ExtendableEvent {
   readonly lastChance: boolean
 }
 
-const SHELL_CACHE = 'pwa-todo-shell-v1'
+// The shell cache name is derived from the precache manifest, so every build with different
+// assets gets a fresh cache. The activate handler then deletes the previous build's cache,
+// which is what removes old hashed assets. The weather cache keeps its fixed name and the
+// to-do tasks live in IndexedDB, so neither is touched by shell updates.
+function manifestVersion(entries: Array<{ url: string; revision: string | null }>): string {
+  const text = entries
+    .map((entry) => `${entry.url}@${entry.revision ?? ''}`)
+    .sort()
+    .join('|')
+  // FNV-1a, 32-bit: tiny, synchronous, stable across SW restarts for the same build.
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+// Read exactly once: workbox's injectManifest requires a single `self.__WB_MANIFEST` match.
+const PRECACHE_MANIFEST = self.__WB_MANIFEST
+
+const SHELL_CACHE = `pwa-todo-shell-${manifestVersion(PRECACHE_MANIFEST)}`
 const CURRENT_CACHES = [SHELL_CACHE, WEATHER_CACHE]
 const WEATHER_HOST = new URL(WEATHER_URL).hostname
 
@@ -31,7 +52,7 @@ self.addEventListener('install', (event) => {
       const cache = await caches.open(SHELL_CACHE)
       // Entry URLs are relative to sw.js, i.e. to the scope. Deduplicate (addAll rejects duplicates)
       // and use `cache: 'reload'` so a new SW version never precaches stale files from the HTTP cache.
-      const urls = [...new Set(self.__WB_MANIFEST.map((entry) => entry.url))]
+      const urls = [...new Set(PRECACHE_MANIFEST.map((entry) => entry.url))]
       await cache.addAll(urls.map((url) => new Request(url, { cache: 'reload' })))
       await self.skipWaiting()
     })(),
@@ -68,7 +89,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (url.hostname === WEATHER_HOST) {
-    event.respondWith(staleWhileRevalidate(request))
+    event.respondWith(staleWhileRevalidate(event))
     return
   }
 
@@ -95,8 +116,11 @@ async function cacheFirst(request: Request): Promise<Response> {
  * Answer immediately from the weather cache when possible and refresh it from the network
  * in the background; when the fresh copy lands, tell open pages so they can re-read it.
  * Without a cached copy the network response is awaited (and cached for next time).
+ * The background refresh is handed to `event.waitUntil`, otherwise the browser may stop
+ * the worker right after `respondWith` settles and the cache write would never happen.
  */
-async function staleWhileRevalidate(request: Request): Promise<Response> {
+async function staleWhileRevalidate(event: FetchEvent): Promise<Response> {
+  const { request } = event
   const cache = await caches.open(WEATHER_CACHE)
   const cached = await cache.match(request)
 
@@ -109,9 +133,11 @@ async function staleWhileRevalidate(request: Request): Promise<Response> {
   })
 
   if (cached) {
-    network.catch(() => {
-      /* offline or API down: the stale copy already answered the page */
-    })
+    event.waitUntil(
+      network.catch(() => {
+        /* offline or API down: the stale copy already answered the page */
+      }),
+    )
     return cached
   }
   return network

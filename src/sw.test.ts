@@ -25,9 +25,12 @@ interface FakeClient {
   postMessage: ReturnType<typeof vi.fn>
 }
 
-function createEnvironment(manifest: Array<{ url: string; revision: string | null }>) {
+type CacheStores = Map<string, Map<string, Response>>
+
+function createEnvironment(manifest: Array<{ url: string; revision: string | null }>, existingStores?: CacheStores) {
   // Cache Storage: Map of cache name → Map of absolute URL → Response.
-  const stores = new Map<string, Map<string, Response>>()
+  // Passing `existingStores` simulates a new SW version starting on the same device.
+  const stores: CacheStores = existingStores ?? new Map()
   const cacheKey = (req: unknown) => new URL(typeof req === 'string' ? req : (req as FakeRequest).url, SCOPE).href
   const openStore = (name: string) => {
     let store = stores.get(name)
@@ -100,11 +103,30 @@ const MANIFEST = [
   { url: 'index.html', revision: '1' }, // duplicate on purpose: addAll rejects duplicates
 ]
 
-async function loadServiceWorker(manifest = MANIFEST) {
+async function loadServiceWorker(manifest = MANIFEST, stores?: CacheStores) {
   vi.resetModules()
-  const env = createEnvironment(manifest)
+  const env = createEnvironment(manifest, stores)
   await import('./sw')
   return env
+}
+
+/** Name of the (single) shell cache currently present; versioned, so looked up by prefix. */
+function shellCacheName(stores: CacheStores): string {
+  const names = [...stores.keys()].filter((name) => name.startsWith('pwa-todo-shell-'))
+  expect(names).toHaveLength(1)
+  return names[0]
+}
+
+async function install(env: ReturnType<typeof createEnvironment>) {
+  const event = extendable()
+  env.dispatch('install', event)
+  await event.done()
+}
+
+async function activate(env: ReturnType<typeof createEnvironment>) {
+  const event = extendable()
+  env.dispatch('activate', event)
+  await event.done()
 }
 
 beforeEach(() => {
@@ -114,13 +136,11 @@ beforeEach(() => {
 describe('service worker', () => {
   it('precaches the deduplicated build manifest on install', async () => {
     const env = await loadServiceWorker()
-    const event = extendable()
-    env.dispatch('install', event)
-    await event.done()
+    await install(env)
 
     expect(env.addAllCalls).toHaveLength(1)
     expect(env.addAllCalls[0]).toHaveLength(2)
-    const shell = env.stores.get('pwa-todo-shell-v1')!
+    const shell = env.stores.get(shellCacheName(env.stores))!
     expect([...shell.keys()].sort()).toEqual([`${SCOPE}assets/index-abc.js`, `${SCOPE}index.html`])
     expect(env.self.skipWaiting).toHaveBeenCalled()
   })
@@ -128,9 +148,7 @@ describe('service worker', () => {
   it('answers navigations from the precached app shell without touching the network', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new TypeError('offline'))))
     const env = await loadServiceWorker()
-    const install = extendable()
-    env.dispatch('install', install)
-    await install.done()
+    await install(env)
 
     let answer: Promise<Response> | undefined
     env.dispatch('fetch', {
@@ -146,17 +164,112 @@ describe('service worker', () => {
 
   it('drops caches of older versions on activate and claims the clients', async () => {
     const env = await loadServiceWorker()
-    env.openStore('pwa-todo-shell-v0')
-    env.openStore('pwa-todo-shell-v1')
+    await install(env)
+    const current = shellCacheName(env.stores)
+    env.openStore('pwa-todo-shell-v1') // the legacy fixed-name cache from 0.1.0
     env.openStore('pwa-todo-weather-v1')
     env.openStore('unrelated-cache')
 
+    await activate(env)
+
+    expect([...env.stores.keys()].sort()).toEqual([current, 'pwa-todo-weather-v1', 'unrelated-cache'].sort())
+    expect(env.self.clients.claim).toHaveBeenCalled()
+  })
+
+  it('gives a new build its own shell cache and removes the old assets on activate', async () => {
+    // Version 1 installs and caches the weather; the to-dos live in IndexedDB, outside Cache Storage.
+    const v1 = await loadServiceWorker([
+      { url: 'index.html', revision: '1' },
+      { url: 'assets/index-old.js', revision: null },
+    ])
+    await install(v1)
+    const oldShell = shellCacheName(v1.stores)
+    v1.openStore('pwa-todo-weather-v1').set(WEATHER_URL, new Response('saved forecast'))
+
+    // Version 2 (different assets) starts on the same device: same Cache Storage.
+    const v2 = await loadServiceWorker(
+      [
+        { url: 'index.html', revision: '2' },
+        { url: 'assets/index-new.js', revision: null },
+      ],
+      v1.stores,
+    )
+    await install(v2)
+
+    // Until activation both caches exist, so the old version keeps working mid-update.
+    const newShell = shellCacheName(new Map([...v2.stores].filter(([name]) => name !== oldShell)))
+    expect(newShell).not.toBe(oldShell)
+    expect(v2.stores.get(oldShell)!.size).toBeGreaterThan(0)
+    expect([...v2.stores.get(newShell)!.keys()]).toContain(`${SCOPE}assets/index-new.js`)
+
+    await activate(v2)
+
+    expect(v2.stores.has(oldShell)).toBe(false)
+    expect(v2.stores.has(newShell)).toBe(true)
+    // The saved forecast survived the update.
+    expect(await v2.stores.get('pwa-todo-weather-v1')!.get(WEATHER_URL)!.text()).toBe('saved forecast')
+  })
+
+  it('reuses the same shell cache name when the build did not change', async () => {
+    const v1 = await loadServiceWorker()
+    await install(v1)
+    const first = shellCacheName(v1.stores)
+
+    const v2 = await loadServiceWorker(MANIFEST, v1.stores)
+    await install(v2)
+
+    expect(shellCacheName(v2.stores)).toBe(first)
+  })
+
+  it('serves the cached forecast and keeps the worker alive (waitUntil) until the refresh lands', async () => {
+    const env = await loadServiceWorker()
+    const page: FakeClient = { url: SCOPE, focus: vi.fn(), postMessage: vi.fn() }
+    env.clients.push(page)
+    env.openStore('pwa-todo-weather-v1').set(WEATHER_URL, new Response('stale forecast'))
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"fresh":true}', { status: 200 })))
+
     const event = extendable()
-    env.dispatch('activate', event)
+    let answer: Promise<Response> | undefined
+    env.dispatch('fetch', {
+      ...event,
+      request: new FakeRequest(WEATHER_URL),
+      respondWith: (r: Promise<Response>) => {
+        answer = r
+      },
+    })
+
+    // The page is answered from the cache immediately...
+    expect(await (await answer!).text()).toBe('stale forecast')
+    // ...and the background refresh was handed to waitUntil, so the browser must wait for it.
+    expect(event.waitUntil).toHaveBeenCalledTimes(1)
     await event.done()
 
-    expect([...env.stores.keys()].sort()).toEqual(['pwa-todo-shell-v1', 'pwa-todo-weather-v1', 'unrelated-cache'])
-    expect(env.self.clients.claim).toHaveBeenCalled()
+    const cached = env.stores.get('pwa-todo-weather-v1')!.get(WEATHER_URL)!
+    expect(await cached.text()).toBe('{"fresh":true}')
+    expect(cached.headers.get(CACHED_AT_HEADER)).toBeTruthy()
+    expect(page.postMessage).toHaveBeenCalledWith({ type: WEATHER_UPDATED })
+  })
+
+  it('keeps the cached forecast when the background refresh fails, without unhandled errors', async () => {
+    const env = await loadServiceWorker()
+    const stale = new Response('stale forecast')
+    env.openStore('pwa-todo-weather-v1').set(WEATHER_URL, stale)
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new TypeError('offline'))))
+
+    const event = extendable()
+    let answer: Promise<Response> | undefined
+    env.dispatch('fetch', {
+      ...event,
+      request: new FakeRequest(WEATHER_URL),
+      respondWith: (r: Promise<Response>) => {
+        answer = r
+      },
+    })
+
+    expect(await answer!).toBe(stale)
+    await event.done() // must resolve: the failure is swallowed inside the waitUntil promise
+
+    expect(env.stores.get('pwa-todo-weather-v1')!.get(WEATHER_URL)).toBe(stale)
   })
 
   it('refreshes the forecast on the Background Sync event and notifies open pages', async () => {
